@@ -1,0 +1,278 @@
+---
+title: Basics of Geospatial Statistics, Interactive Mapping and Generating Reproducible
+  Reports in R Markdown
+output:
+  html_document:
+    df_print: paged
+---
+
+### Tutorial Overview
+
+* Environment Set Up
+* Motivations for this Tutorial
+* Conceptualization of Spatial Relationships
+* Inferential Statistics in Geospatial Analysis
+  * Spatial Autocorrelation - Global Moran's I
+  * Cluster and Outlier Analysis - Local Moran's I
+  * High/Low Clustering - GetiS-Ord General G
+  * Hot Spot Analysis - Getis-Ord Gi*
+* **Example**: Interactively Mapping Umemployment Hotspots in the United States
+
+### Environment Set Up
+One of the best practices to strive for when doing research and analytics is to ensure that your work is reproducible. Markdowns allow us to combine our code for our analysis and content for reporting in a streamlined fashion. By using markdown we can avoid problems that arise from cutting and pasting our analysis into word documents. 
+
+Run the following code to set up your work environment and load the necessary libraries:
+
+```{r}
+packages <- c("spdep","knitr", "dplyr","sp","ggplot2", "stringr", "acs", "tigris", "leaflet", "RColorBrewer", "sf")
+
+package_check <- lapply(packages, FUN = function(x){
+  if(!require(x, character.only = TRUE)){
+    install.packages(x, dependencies = TRUE,
+                     repos = "http://cran.us.r-project.org")
+    library(x, character.only = TRUE)
+  }
+})
+  
+```
+
+### Tutorial Motivations
+
+In this tutorial we will explore geospatial statistics within the context of polygon data, create a recipe using *leaflet* and *ggplot* to map your data, and use the basics of markdown to tie all components of your report in a reproducible format. 
+
+A main problem in geospatial visualizations is the subjectivity of maps, as demonstrated by the choropleth maps below. Both maps display the same data but in slightly different ways. These different displays can lead to vastly different decisions. 
+
+```{r, echo=FALSE}
+# Pull California TIGER shapefile at the census tract level
+metro_counties <- c("Cherokee", "Clayton", "Cobb",
+                    "Coweta", "DeKalb", "Douglas",
+                    "Fayette", "Forsyth", "Fulton",
+                    "Gwinnett", "Henry", "Newton", 
+                    "Paulding", "Rockdale", "Spalding",
+                    "Walton")
+
+shp <- tracts(state = "Georgia", county = metro_counties, cb = TRUE, year = 2016, refresh = TRUE)
+
+# Create geoset for ATL Metro
+# Fulton (121), Cherokee (057), Forsyth (117), Cobb (067), Paulding, Douglas,
+# Clayton, Fayette, Spalding, Henry, Rockdale, Newton,
+# Walton, Dekalb, Gwinnett, Forsyth, Coweta
+
+geo.set <- geo.make(state = "GA", county = metro_counties, tract = "*")
+
+# Pull unemployment data from ACS
+pull <- acs.fetch(endyear = 2016, span = 5, geography = geo.set,
+                  table.name = "B23001", col.names = "pretty")
+
+geo <- pull@geography
+est <- pull@estimate
+
+# Merge, drop NAMES column, remove row names
+data <- cbind(geo, est)
+drop_var <- names(data)[1]
+data <- data[, !names(data) %in% drop_var]
+rownames(data) <- NULL
+
+# Select only total unemployment
+data <- data[, c(1:3, seq(from = 4, to = 175, by = 7))]
+
+# Rename total colum
+colnames(data)[4] <- "total"
+
+# Calculate row sums
+data <- data %>% mutate(unemployment = rowSums(.[5:length(data)])) %>%
+  mutate(percent = round((unemployment/total) * 100, 2)) %>%
+  select(state, county, tract, unemployment, percent)
+
+# Create GEOID
+data[, 1:2] <- sapply(data[, 1:2], function(x) as.character(x))
+data$state <- str_pad(data$state, width = 2, side = "left", 
+                      pad = "0")
+data$county <- str_pad(data$county, width = 3, side = "left",
+                       pad = "0")
+data$GEOID <- paste0(data$state, data$county, data$tract)
+
+# Create choropleth map with ggplot 
+# Convert sp object to sf object
+gg_shp <- fortify(shp, region = "GEOID")
+
+# Turn generated "id" to a factor GEOID column for merging
+gg_shp$GEOID <- factor(gg_shp$id)
+gg_shp$id <- NULL
+
+# Combine 
+plot.data <- merge(gg_shp, data)
+
+ggplot(plot.data, aes(x = long, y = lat,
+                      group = group)) +
+  geom_polygon(aes(fill = unemployment)) +
+  scale_fill_distiller(type = "div", palette = "RdBu",
+                    direction = -1) + 
+  coord_equal() + ggtitle("Unemployment Population in the\n Atlanta Metro Area in 2016") + theme(legend.title = element_blank()) + theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+
+The limitations of EDA such as this is that we have no way of knowing the following:
+
+* Where are there hotspots in argiculture employment?
+* Where is the variation greater?
+
+This is where inferential statistics.
+
+### Geospatial Inferential Statistics
+
+#### Spatial Autocorrelation - Global Moran's I
+
+* **Tests for**: Is there spatial clustering of values or spatial dispersion of values? This test only indicates whether similar values exhibit clustering, not whether the clusters are composed of high or low values. 
+* **Interpretation**: The results of the analysis are always interpreted within the context of a null hypothesis which states that the spatial processes that produce the observed pattern occurs by random chance. The alternative hypothesis is that the data is more spatially clustered or dispersed than you would expect by chance alone.
+* **Output**:
+    * Moran's I Index: Value ranges from -1 to 1. A value of -1 indicates that data display perfect dispersion. A value of 0 indicates that the data display perfect randomness. A value of 1 indicates the data display perfect clustering. However, this should always be interpreted within the context of the resulting z-scores and p-values.
+    * p-value is significant & z-score > 0: indicates that the data is spatially clustered in some way.
+    * p-value is significant & z-score < 0: indicates that  the data is spatially dispersed in some way and might reflect some competitve spatial process.
+
+#### High/Low Clustering - Getis-Ord General G
+
+* **Tests for**: This tool is used to assess how high or low values are concentrated over a study area. 
+* **Interpretation**: The results of the analysis are always interpreted within the context of a null hypothesis which states that the spatial processes that produce the observed pattern occurs by random chance. The alternative hypothesis is that features with high values cluster more than you would expect than by chance alone, or that features with low values cluster more than you would expect data than by chance alone.
+* **Output**: 
+    * A statistically significant p-value and a z-score > 0 indicates that features with high values cluster together spatially. 
+    * A statistically significant p-value and a z-score < 0 indicates that features with low values cluster together.
+
+#### Cluster and Outlier Analysis - Anselin Local Moran's I
+
+* **Tests for**: This tool actually allows you to map the clusters by identifying where similar values cluster and also helps you identify spatia outliers and their locations.
+* **Interpretation**: If the I index is positive then the feature is surrounded by features with similar values, indicating that it is part of a cluster. If the I index is negative then the feature is surrounded by dissimilar values, and is therefore classified as an outlier. Note that this test will not tell you whether or not those outliers and clusters are features with high or low values. 
+* **Output**: Remember that the results must always be interpreted within the context of the p-value and the z-score.
+    * Local Moran's I index
+    * z-score
+    * p-value
+
+#### Hotspot Analysis - Getis-Ord Gi*
+
+* **Tests for**: This tool also allows you to map which features in your dataset that classify as hotspots as well as features that classify as cold spots. 
+* **Interpretation**:
+* **Output:** The Gi* statistic is the a z-score for each feature in the dataset. If the z-score is positive and significant (p-value < alpha) then the feature is considered a hotspot. The intensity of the hotspot is determined by how large the z-score is. Alternatively, if the z-score is negative and significant then the feature is considered a coldspot. The intensity of the coldspot is determined by how small the z-score is.
+
+### Modeling Spatial Relationships
+
+Tobler's First Law of Geography: *Everything is realted to everything else, but near things are more related than distant things.*
+
+Spatial statistics takes into account space as a factor in how features in our data relate to one another. In practice we need to select a conceptualization of spatial relationships prior to analysis. This is just a high-level way of saying we need to define how features within a layer interact and influence each other. 
+Although there are many different spatial relationships that we can select from, for the purposes of this tutorial we will focus on the three most often used. 
+
+1. **Inverse Distance:** This conceptualization of spatial relationships is based on distance decay, meaning that all features will impact and influence all other features. The farther away a feature is to our target feature, the smaller its impact will be. The distance selected is subject matter specific. 
+2. **Distance Bands:** This conceptualization is also known as sphere of influene, where you impose a pre-defined critical distance. Features outside the critical distance of a target feature do not exert any influence or impact on the target feature.
+3. **Zone of Indifference**: This conceptualization of spatial relationships combines the first two models. The features within the defined critical distance will exert influence on the target feature in the analysis. Features outside that distance will also exert some influence but that impact will lessen as the distance between a feature and the target feature increases.
+
+Always remember that the conceptualization of spatial relationships is chosen within the context of your data, which is why domain knowledge of your subject matter is critical. 
+
+### Computing Global Moran's I and Global Getis-Ord.
+
+To run these tests we first join the tabular data to the shapefile data. The we need to model the conceptualization of spatial relationships by defining how neighborhoods relate to one another with *poly2nb()* and creating a weights matrix with *nb2listw()*. We will use these spatial weights matrix in the functions for the aforementioned tests.
+
+```{r}
+# Geojoin tabular data to shapefile
+shp_merge <- geo_join(shp, data, by_sp = "GEOID",
+                  by_df = "GEOID")
+# Define neighboring polygons
+nb <- poly2nb(shp_merge, queen = T)
+
+# Assign weights to each neighboring polygon
+lw <- nb2listw(nb, style = "W", zero.policy = T)
+
+# Compute Moran's I
+moran.test(shp_merge$unemployment, lw)
+
+```
+
+```{r}
+# Compute Getis-Ord
+globalG.test(shp_merge$unemployment, lw, alternative = "greater")
+```
+
+### Using Leaflet to Map
+
+To demonstrate interactive mapping, we will calculate Local Moran's I to find outwhere tracts cluster and also to find where there are outliers. Remember that we cannot tell whether the clusters are high areas of unemployment or low areas of unemployment, only that those areas are surrouding by areas with similar levels of unemployment and then form a cluster. You can easily alter the same recipe below to map the results of your hot spot analysis, which would help you determine where there are high areas of unemployment and where are there low areas of unemployment. 
+
+In the following code chunk below we will calculate Local Moran's I. The function we call is *localmoran*, in which we input our variable of interest, the listw object we created earlier, and set the null hypothesis to greater. 
+
+```{r}
+# Performing Local Moran's I
+lmi_results <- localmoran(shp_merge$unemployment, listw = lw, alternative = "greater")
+
+head(lmi_results)
+```
+
+Next we merge both the I index values and p-values from the Local Moran's I results to our shapefile. We also create a factor column to add where we classify each resulting p-value as either significant or not. We also create a factor column to classify each feature as either a cluster, an outlier, or neither. 
+
+```{r}
+# Extra local moran index column and p-value column
+shp_merge$lmi <- lmi_results[,1]
+shp_merge$lmi_p <- lmi_results[5]
+shp_merge$lmi_sig <- as.factor(ifelse(lmi_results[,5]<.001, "Sig p<.001",
+                                 ifelse(lmi_results[,5]<.05, "Sig p<.05", "Not Significant")))
+                            
+shp_merge$type <- as.factor(ifelse(lmi_results[,1]>0 & lmi_results[,5]<.001, "Cluster",
+                              ifelse(lmi_results[,1]>0 & lmi_results[,5]<.05, "Cluster",
+                                     ifelse(lmi_results[,1]<0 & lmi_results[,5]<.001, "Outlier",
+                                            ifelse(lmi_results[,1]<0 & lmi_results[,5]<.05, "Outlier", "NA")))))
+```
+
+We are now ready to map those values with leaflet. In the first line of code we are defining the color palette for the cluster and outlier map. It is best practice to use diverging colors like red and blue when designing color-blind friendly visualizations. However, for this we will select a the "Reds" color palette since the resulting Local Moran's I found no outliers. 
+
+Using *colorFactor()* we define the color scheme to have only two equally-sized quantiles, which we will define as "Cluster (High-High)" or "NA".
+
+```{r}
+# Reverse color palette
+color <- "Reds"
+palette_rev <- rev(brewer.pal(5, color))
+
+# Define color scheme
+pal <- colorFactor(palette = palette_rev, domain = shp_merge$type, n = 3)
+
+# Create map
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(data = shp_merge,
+              fillColor = ~pal(type),
+              color = "#b2aeae",
+              fillOpacity = 0.7,
+              weight = 1,
+              smoothFactor = 0.2) %>%
+  addLegend(pal = pal,
+            values = shp_merge$type,
+            position = "topright",
+            title = "Cluster and Outlier Analysis <br> for Unemployed
+            Population in the Atlanta Metro Area")
+
+```
+
+#### Using Leaflet to Map Significant Clusters of Unemployment
+
+We'll replicate a similar technique to map where these significant clusters and hotspots occur:
+
+```{r}
+# Define categorical data scheme
+color_fact <- "YlGn"
+palette_sig <- brewer.pal(3, color_fact)
+factpal <- colorFactor(palette = palette_sig, domain = shp_merge$lmi_sig, n =2)
+
+# Create leaflet map
+leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(data = shp_merge,
+              fillColor = ~factpal(lmi_sig),
+              color = "#b2aeae",
+              fillOpacity = 0.7,
+              weight = 1,
+              smoothFactor = 0.2) %>%
+  addLegend(pal = factpal,
+            values = shp_merge$lmi_sig,
+            position = "topright",
+            title =  "Statiscially Significant Clusters of <br> Unemployed
+            Populations in the <br> Atlanta Metro Area")
+
+```
+
+

@@ -1,0 +1,278 @@
+---
+title: Using the acs & tigris Packages to Pull and Map Demographic Data From the U.S. Census American Community Survery
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook tutorial to curate a dataset with tabular demographic and spatial data using the U.S. Census ACS and TIGER API wrappers. When you execute code within the notebook, the results should appear beneath the code. 
+
+### **Environment Set Up**
+
+To begin navigate to the top of your R Studio IDE and under **New File** select **R Notebook**. Once you have opened a new Notebook file copy and execute the first chunk of code below to install the neccessary packages and load libraries that you will need to work through your own Notebook. Take a look at the list below to learn more about what each package does. Now that you have everything downloaded open the file *acs & tigris workbook.Rmd* in a separate tab and compile the markdown file by clicking **Knit** at the top of the tool bar. The output should be an html document. Use this document to work through the workbook. When going through this notebook choose whatever method best fits your learning style. 
+
+#### **Packages to Download**
+* *knitr*: for creating dynamic reports 
+* *dplyr*: for working with data frames
+* *sp*: for handling spatial objects
+* *ggplot2*: for graphics and visualizations
+* *stringr*: for manipulating strings and to pad FIPS codes 
+* *acs*: for pulling tabular data from the U.S. Census American Community Survey
+* *tigris*: for pulling TIGER/line shapefiles from the U.S. Census
+* *leaflet*: for creating interactive maps
+* *RColorBrewer*: for creating color palettes
+
+```{r, message=FALSE, results='hide', warning=FALSE}
+packages <- c("knitr", "dplyr","sp","ggplot2", "stringr", "acs", "tigris", "leaflet", "RColorBrewer")
+
+# Set the dependencies arugment to TRUE to install uninstalled packages that these packages depend on.
+
+# Below is a function that checks if each package is already installed
+# If the package is installed it will be loaded
+# If the package is missing, the packages will be installed and loaded
+
+package_check <- lapply(packages, FUN = function(x){
+  if(!require(x, character.only = TRUE)){
+    install.packages(x, dependencies = TRUE,
+                     repos = "http://cran.us.r-project.org")
+    library(x, character.only = TRUE)
+  }
+})
+  
+# verufy they are loaded
+search()
+```
+
+### **Downloading Tabular Data**
+
+To begin pulling tabular data you will need to request an API key from the [US Census website](https://api.census.gov/data/key_signup.html) and then execute the following code to authenticate it. Remember to replace the string **"YOUR API KEY"** with your own API key.
+
+```{r, message=FALSE}
+key <- "YOUR API KEY"
+key <- "73052a1c27ab4747c96d838a03b24f4989364dd8"
+# Authenticate API key
+api.key.install(key = key)
+```
+
+#### **1. Create a *geo.set* Object**
+
+Before you can start pulling data to analyze, you need to create a **geo.set object** for the geography that your are interested in and for the level of granularity you want to set your analysis at. The *geo.make()* function in the *acs* packages allows you to specify geography using the following arguments:
+
+* *state*: accepts either a numeric two-digit FIPS code for the state, a two-letter postal abbreviation, or a character string to match the state name. 
+* *county*: accepts either a numeric three-digit FIPS code for the state, a two-letter postal abbreviation, or a character string to match the county name. To select all counties use the wildcard "*".
+* *tract*: to select all tracts in a county use the wildcard "*".
+
+Instead of having to Google the state's and county's **FIPS code**, use the *lookup_code()*. The argument must be a string representing the state and county of interest. For this workbook we will be mapping lack of private health insurance among children in the California by county. Therefore, we will be using the wildcard **"*"** to specify we want the function to pull all counties within California.
+
+```{r}
+# Create geo.set for the Los Angeles County in California
+state <- "California"
+lookup_code(state = state)
+```
+
+From the output we see that the FIPS code for Califoria is 06. Execute the code below to create the geo.set object:
+
+```{r}
+geo.set <- geo.make(state = 06, county = "*")
+```
+
+#### **2. Data Pulling**
+
+Now that you have created a geo.set object it is time to start making calls to the API using the *acs.fetch()* function:
+
+The function takes the following arguments:
+
+* *endyear*: an integer indicating the latest year of data in the survey. If you selected 5-year ACS data for 2012-2016, the end year would be 2016. 
+* *span*: an integer indicating the span in years of the desired ACS data. The ACS provides 1-year, 3-year and 5-year estimates. For the purposes of this project, we are more concerned with precision rather than currency. Therefore, make sure sure to select a five year span. 
+* *geography*: a valid geo.set that you created earlier specifying the geography to be fetched. 
+* *col.names*: to pull data with descriptive variable names set the is argument to "pretty".
+* *table.number*: a string representing the table number from the Census to fetch.
+
+For this Notebook we will be mapping how many children lack private health insurance in california. Before we can make the call to the API, we need to determine the table.number for our data of interest. Using the *table_lookup()* function you can query for the appropriate table using keywords that describe your data. The output is a new list that contains the results from the query.
+
+```{r, message= FALSE, warning=FALSE}
+# The fourth argument are the keywords
+# Set case sensitive to FALSE to improve matches
+table_lookup <- acs.lookup(2016, 5, dataset = "acs", "private health insurance", case.sensitive = FALSE)
+```
+
+The results from the query can be retrieved with the following code. We wrap the command in the *View()* function to be able to read the results better:
+
+```{r}
+View(table_lookup@results)
+```
+
+The corresponding table number for our table of interest, *Private Health Insurance Status by Sex by Age*, is **B27002**. With the table number identified, we can excute the following command to download our demographic data and create a new object. When downloading multiple tables, it is best practice to standardize a naming convention for the objects you create. 
+
+```{r, warning=FALSE}
+private_insurance <- "B27002"
+ca_B27002 <- acs.fetch(endyear = 2016, span = 5, geography = geo.set, table.number = private_insurance, dataset = "acs",
+                       col.names = "pretty")
+```
+
+Now we have to extract the tabular data with its corresponding spatial data from the list and merge the two into a data frame. Use the *View()* function to explore the data:
+
+```{r}
+B27002_geo <- ca_B27002@geography # spatial data
+B27002_est <- ca_B27002@estimate # tabular data
+no_insurance <- cbind(B27002_geo, B27002_est) # merge data frames
+```
+
+Looking at the table we see that we have several unneccessary variables. We can filter the data fame to select for only those who are under 18 who lack private insurance. Use the *name()* function to look up the column names you want to select. When subsetting the data frame you will need to preserve the first four columns to be able to merge with the shapefile later.
+
+```{r}
+names(no_insurance)
+```
+
+Since we want to calculate the percentage of children who lack private health insurance we will select the following columns:
+
+* *[5] "Private Health Insurance Status by Sex by Age: Total"*
+* *[9] "Private Health Insurance Status by Sex by Age: Male: Under 6 years: No private health insurance"*
+* *[12] "Private Health Insurance Status by Sex by Age: Male: 6 to 17 years: No private health insurance" *
+* *[37] "Private Health Insurance Status by Sex by Age: Female: Under 6 years: No private health insurance" *
+* *[40] "Private Health Insurance Status by Sex by Age: Female: 6 to 17 years: No private health insurance"* 
+
+To make code cleaner we will subset using the indices.
+
+```{r}
+# Subset columns of interest
+no_insurance <- no_insurance[, c(1:4, 5, 9, 12, 37, 40)]
+```
+
+To make data wrangling cleaner we can rename the columns names to shorthands.
+
+```{r}
+colnames(no_insurance)[5] <- "total"
+colnames(no_insurance)[6] <- "m_sub_6"
+colnames(no_insurance)[7] <- "m_sub_17"
+colnames(no_insurance)[8] <- "f_sub_6"
+colnames(no_insurance)[9] <- "f_sub_17"
+```
+
+Now that we have the data frame we can combine the columns for all children under 18, female children under 18, and male children under 18, calculate their percentages, and subset to keep only the necessary columns.
+
+```{r}
+# Combine counts by gender
+no_insurance <- no_insurance %>% mutate(males = m_sub_6 + m_sub_17,
+                                        females = f_sub_6 + f_sub_17,
+                                        total_sub_18 = m_sub_6 + m_sub_17 +
+                                          f_sub_6 + f_sub_17)
+
+# Calculate percentages
+no_insurance <- no_insurance %>% select(NAME, state, county,
+                                        total, males, females, total_sub_18) %>%
+  mutate(male_perc = round((males/total)*100, 2),
+         female_perc = round((females/total)*100, 2),
+         total_perc = round((total_sub_18/total)*100, 2))
+```
+
+### **Downloading Shapefile Data**
+
+Now we are getting ready to map our data. We will use the *counties()* function in the *tigris* package to download TIGER shapefiles to map the data at the county level. For a more granular analysis, it is always best practice to select the census tract level (using the *tract()* function) since it provides the most stable set of geographic units to present statistical data. The function takes the follwoing arguments:
+
+* *state*: a string representing a two-digit FIPS code for the state you want, state name or state abbreviation. 
+* *county*: ac string representing a three-digit FIPS code for the county you want, the county name, or a vector of names. 
+* *cb*: set this argument to "TRUE" to download a generalized file for better mapping in lieu of a detailed file. 
+
+```{r, message=FALSE, results='hide', warning=FALSE}
+shp <- counties(state = "CA", year = 2016, cb = TRUE)
+```
+
+To merge our demographic data to the shapefile we need to make sure we have a common ID by which we can join the tabular and spatial data. This is usually done using the GEOID. Our demographic data frame does not come with an existing GEOID. 
+
+However, it does contain the necessary columns to create a GEOID column that matches the GEOID column in our shapefile. Execute the following code below to extract the spatial data of our shapefile to see to if we need to pad our values with additional zeroes. Using the *names()* function we see that the GEOID is column 5. 
+
+```{r}
+head(shp@data[, 5])
+```
+
+The output shows that each GEOID is a five-digit string made up by a two-digit state FIPs code and a three-digit county FIPs code. Notice that the values are padded by zeros. Executing the code below we can check to see if we need to do any additional padding for the FIPs codes in our demographic data. 
+
+```{r}
+head(no_insurance[, 2:3])
+```
+
+Looking at the data we can see that the county FIPs codes are already padded but the state FIPS codes are not. Remeber that state FIPs codes contain two-digits so we will need to pad each value in the *state* column with one preceeding zero. 
+
+We create the GEODID column by combing the *state* and *county* columns using the *paste0()* function. We accomplish this by concatenating the values from both columns. Using the *str()* function used to check the structure of our data frame, we see that the *state* column contains integer data and the *county* column contains string data. 
+
+To begin we must convert the *state* column from interger to string. Afterwards we will pad the resulting *state* FIPs codes with one preceding zero and combine the two string columns. The *str_pad()* function from the *stringr* package below helps us accomplish that. 
+
+For the first argument in the function we input the string column we are interested in padding. We temporarily convert our *state* column to a string by wrapping it in the *as.character()* function. With the width argument we specify the length of our desired string. Since a state FIPs code is two-digits, we specify the number *2*. The *side* argument allows us to specify whether we want to pad our string with leading zeroes, trailing zeroes or both. For leading zeroes we specify *"left"*. Finally for the last argument *pad* we input *"0"* to specify the character we want to pad our string with. 
+
+With all that done we wrap those functions with *paste0()* to concatenate the *state* and *county* columns with no spaces into a new GEOID column. Remember to reorder your columns so that GEOID become the first column.
+
+```{r}
+# Padding zip codes
+no_insurance$GEOID <- paste0(str_pad(as.character(no_insurance$state), 
+                                     width = 2, side = "left",
+                                     pad = "0"), no_insurance$county)
+
+# Reoder columns
+no_insurance <- no_insurance[,c(length(no_insurance), 1:length(no_insurance)-1)]
+```
+
+Now it is time to merge our tablular data to our shapefile using the *goe_join()* function from the *tigris* package. Before doing so, it is always a good idea to make sure that both the data frame and shapefile are of the same length. You can check this by excecuting the following code:
+
+```{r}
+if(nrow(shp@data[1]) == nrow(no_insurance[1])){
+  print(TRUE)
+} else{ print(FALSE)}
+
+shp_merged <- geo_join(shp, no_insurance, by_sp = "GEOID", 
+                       by_df = "GEOID")
+```
+
+### Creating Your Map
+
+To begin creating your map we start off by defining labels for each individual county. Once we have our final product, we will be able to move our cursor over our map and get the details for that county. With the first line of code we create a vector with each element being the statistic for that county, and concatenate it with county name information and what that data represents. We use the *<br>* argument when we want to indent to a new line in our label. 
+
+The content of the **popup** is entirely up to you!!!
+
+Next we want to define our color palette. It is always best practice to pick strong diverging colors like red and blue. In the second line of code I define the palette I want to use and then wrap it in the fuction *rev()* so that high values are colored as red and low values are colored as blue. 
+
+Then I define the color scheme for my leaflet map using the *colorQuantile()* function from the *leaflet* package. This function allows us to map our numeric data by quantiles. Check out the [leaflet documentation](https://www.rdocumentation.org/packages/leaflet/versions/2.0.2/topics/colorNumeric) to learn about more function to map different types of data. 
+
+The next lines of code uses the *addProviderTiles()* to specify the base map from a free provider. Which provider you choose is a is largely a stylistic preference. Check out this [resource](http://leaflet-extras.github.io/leaflet-providers/preview/index.html) for a complete list of available providers. For this Notebook I used CartoDBs Positron design. 
+
+The *addPolygons()* function is then used to map the county shapes and colors them accordingly. Inputs for the rest of the arguments are stylistic choices and require experimenting with to produce a compelling map. Note that the fillcolor argument requires you to wrap the column of data you want mapped with the following function *~pal()*.
+
+Finally we add a legend with *addLegend()* to the map and specify our color palette, data to generate colors for, legend position, and title. 
+
+```{r}
+# Create popup labels
+popup <- paste("County:", shp_merged$NAME, "<br>",
+                "Percent of Children Who Lack Private Health Insurance", paste0(round(shp_merged$total_perc, 2),"%"))
+
+# Reverse color palette
+color <- "RdBu"
+palette_rev <- rev(brewer.pal(5, color))
+
+# Define color scheme
+pal <- colorQuantile(palette = palette_rev, domain = shp_merged$total_perc, n = 6)
+
+# Create map
+map_ins <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(data = shp_merged,
+              fillColor = ~pal(total_perc),
+              color = "#b2aeae",
+              fillOpacity = 0.7,
+              weight = 1,
+              smoothFactor = 0.2,
+              popup = popup) %>%
+  addLegend(pal = pal,
+            values = shp_merged$total_perc,
+            position = "topright",
+            title = "Percent Children Without Private<br>Health Insurance")
+
+# Display map
+map_ins
+```
+
+### Time to Publish
+
+Congratulations! You just made your first interactive map. For your next assignment. You are task with pulling demographic, housing, energy, employment, environmental, and public health data at the census tract level from the American Community Survey for Montgomery County, Maryland. Using what you learned, you will visit the [ACS Website](https://factfinder.census.gov/faces/nav/jsf/pages/index.xhtml) and explore the tables you think contains the data that best represents the aformentioned categories. We will use that data to curate a larger dataset with both tabluar and spatial data for Hackathon for Housing taking place that is already formatted to creates products like our final map.
+
